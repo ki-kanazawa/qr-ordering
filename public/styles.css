@@ -173,6 +173,23 @@ a { color: inherit; text-decoration: none; }
 .tag { display: inline-flex; align-items: center; padding: 5px 8px; border-radius: 999px; background: #eef4e9; color: var(--green); font-size: 10px; font-weight: 700; }
 .tag.offline { background: #f4f0ed; color: #91887e; }
 .order-actions { display: flex; align-items: center; gap: 8px; }
+.sales-controls { display: flex; align-items: center; gap: 9px; }
+.sales-date-label { color: var(--muted); font-size: 12px; }
+.sales-controls input { min-height: 38px; padding: 7px 9px; border: 1px solid var(--line); border-radius: 9px; background: white; color: var(--ink); }
+.sales-print-heading, .sales-print-footer { display: none; }
+.sales-ledger { margin-top: 16px; }
+.sales-ledger h2 { margin-bottom: 14px; }
+.sales-table-wrap { overflow-x: auto; }
+.sales-table { width: 100%; min-width: 720px; border-collapse: collapse; font-size: 12px; }
+.sales-table th, .sales-table td { padding: 10px 9px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+.sales-table thead th { background: #f7f8f5; color: #647168; font-weight: 700; white-space: nowrap; }
+.sales-table tbody tr:last-child td { border-bottom: 0; }
+.sales-table .sales-amount { text-align: right; white-space: nowrap; }
+.sales-table td small { color: #a64f3b; }
+.sales-cancelled { color: #858b87; background: #faf9f7; }
+.sales-cancelled td:nth-child(2), .sales-cancelled .sales-amount { text-decoration: line-through; }
+.sales-table tfoot th { border-top: 2px solid var(--line); border-bottom: 0; font-size: 13px; }
+.sales-empty { padding: 32px 12px; }
 
 @media (max-width: 720px) {
   .page-width, .admin-shell { width: min(100% - 28px, 540px); }
@@ -199,6 +216,8 @@ a { color: inherit; text-decoration: none; }
   .admin-shell { width: calc(100% - 26px); }
   .admin-main { padding-top: 18px; }
   .admin-panel { padding: 16px; }
+  .sales-toolbar { align-items: flex-start; flex-wrap: wrap; }
+  .sales-controls { flex-wrap: wrap; }
   .menu-form { grid-template-columns: 1fr 1fr; }
   .menu-form .field.description-field { grid-column: 1 / -1; }
   .table-settings { grid-template-columns: 1fr; }
@@ -221,4 +240,26 @@ a { color: inherit; text-decoration: none; }
   .admin-header, .admin-tabs, .admin-panel > p, .qr-card button { display: none !important; }
   .qr-grid { grid-template-columns: repeat(3, 1fr); }
   .qr-card { break-inside: avoid; border: 1px solid #ccc; }
+  .admin-page.printing-sales { min-height: 0; background: white; }
+  .printing-sales .admin-shell, .printing-sales .admin-main, .printing-sales #admin-panel { width: 100%; padding: 0; margin: 0; }
+  .printing-sales .sales-print-area { padding: 0; }
+  .printing-sales .sales-print-heading, .printing-sales .sales-print-footer { display: block; }
+  .printing-sales .sales-print-heading { margin-bottom: 16px; text-align: center; }
+  .printing-sales .sales-print-heading h1 { margin: 0; font-size: 20px; }
+  .printing-sales .sales-print-heading p { margin: 5px 0 0; font-size: 12px; }
+  .printing-sales .sales-controls, .printing-sales .sales-toolbar p { display: none !important; }
+  .printing-sales .sales-toolbar { margin-bottom: 12px; }
+  .printing-sales .sales-toolbar h2, .printing-sales .sales-ledger h2 { font-size: 15px; }
+  .printing-sales .sales-stats { gap: 8px; margin-bottom: 12px; }
+  .printing-sales .stat-card { padding: 10px; border-color: #bbb; border-radius: 0; }
+  .printing-sales .stat-card span { color: #555; font-size: 10px; }
+  .printing-sales .stat-card strong { margin-top: 4px; font-size: 16px; }
+  .printing-sales .sales-ledger { padding: 10px; margin-top: 0; border: 1px solid #bbb; border-radius: 0; box-shadow: none; }
+  .printing-sales .sales-table { font-size: 10px; }
+  .printing-sales .sales-table th, .printing-sales .sales-table td { padding: 6px 5px; border-color: #ccc; }
+  .printing-sales .sales-table thead th { background: #eee !important; color: #222; }
+  .printing-sales .sales-cancelled { background: #f4f4f4 !important; }
+  .printing-sales .sales-print-footer { margin-top: 12px; color: #555; font-size: 9px; text-align: right; }
+  .printing-sales .admin-main { padding-bottom: 0; }
+  .printing-sales .sales-table tr { break-inside: avoid; }
 }

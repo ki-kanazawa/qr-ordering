@@ -1,5 +1,12 @@
 const appRoot = document.querySelector('#app');
 const toastRoot = document.querySelector('#toast');
+function formatDateInput(date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
 const state = {
   menu: [],
   settings: null,
@@ -421,7 +428,7 @@ function renderAdminLogin(message = '') {
   });
 }
 
-let adminState = { orders: [], menu: [], settings: null, tab: 'orders', orderFilter: 'all', editingId: '' };
+let adminState = { orders: [], menu: [], settings: null, tab: 'orders', orderFilter: 'all', salesDate: formatDateInput(new Date()), editingId: '' };
 let adminTimer = null;
 
 function renderDashboard(data) {
@@ -432,7 +439,7 @@ function renderDashboard(data) {
   if (!main) return;
   main.innerHTML = `
     <nav class="admin-tabs">
-      ${[['orders', '📋 注文管理'], ['menu', '🍽 メニュー管理'], ['tables', '▦ テーブル・QRコード']].map(([tab, label]) => `<button class="admin-tab ${adminState.tab === tab ? 'active' : ''}" data-action="admin-tab" data-tab="${tab}">${label}</button>`).join('')}
+      ${[['orders', '📋 注文管理'], ['sales', '💴 売上・日次流水'], ['menu', '🍽 メニュー管理'], ['tables', '▦ テーブル・QRコード']].map(([tab, label]) => `<button class="admin-tab ${adminState.tab === tab ? 'active' : ''}" data-action="admin-tab" data-tab="${tab}">${label}</button>`).join('')}
       <button class="admin-tab" style="margin-left:auto" data-action="logout">ログアウト</button>
     </nav>
     <section id="admin-panel"></section>`;
@@ -444,6 +451,7 @@ function renderAdminPanel() {
   const panel = document.querySelector('#admin-panel');
   if (!panel) return;
   if (adminState.tab === 'orders') renderOrdersPanel(panel);
+  if (adminState.tab === 'sales') renderSalesPanel(panel);
   if (adminState.tab === 'menu') renderMenuPanel(panel);
   if (adminState.tab === 'tables') renderTablesPanel(panel);
 }
@@ -497,6 +505,70 @@ function renderAdminOrder(order) {
       </select>
     </div>
   </article>`;
+}
+
+function renderSalesPanel(panel) {
+  const dayOrders = adminState.orders
+    .filter((order) => formatDateInput(new Date(order.createdAt)) === adminState.salesDate)
+    .sort((first, second) => second.createdAt.localeCompare(first.createdAt));
+  const salesOrders = dayOrders.filter((order) => order.status !== 'cancelled');
+  const revenue = salesOrders.reduce((sum, order) => sum + order.total, 0);
+  const itemQuantity = salesOrders.reduce((sum, order) => sum + order.items.reduce((orderSum, item) => orderSum + item.quantity, 0), 0);
+  const cancelledCount = dayOrders.length - salesOrders.length;
+  const restaurantName = adminState.settings?.restaurantName || '店舗';
+  panel.innerHTML = `
+    <section class="sales-print-area" id="sales-print-area">
+      <header class="sales-print-heading">
+        <h1>${escapeHtml(restaurantName)} · 日次売上流水</h1>
+        <p>対象日：${escapeHtml(adminState.salesDate)}</p>
+      </header>
+      <div class="section-title-row sales-toolbar">
+        <div><h2>売上管理・日次流水</h2><p>取消注文は明細に表示しますが、売上合計には含めません。</p></div>
+        <div class="sales-controls">
+          <label class="sales-date-label" for="sales-date">営業日</label>
+          <input id="sales-date" type="date" value="${escapeHtml(adminState.salesDate)}">
+          <button class="primary-button" type="button" data-action="print-sales">🖨 流水を印刷</button>
+        </div>
+      </div>
+      <div class="stats-grid sales-stats">
+        <div class="stat-card"><span>売上合計（取消を除く）</span><strong>${money(revenue)}</strong></div>
+        <div class="stat-card"><span>有効注文数</span><strong>${salesOrders.length}</strong></div>
+        <div class="stat-card"><span>販売数量 · 取消注文</span><strong>${itemQuantity} · ${cancelledCount}件</strong></div>
+      </div>
+      <div class="admin-panel sales-ledger">
+        <h2>注文流水</h2>
+        <div class="sales-table-wrap">
+          ${dayOrders.length ? `<table class="sales-table">
+            <thead><tr><th>時刻</th><th>注文番号</th><th>テーブル・お名前</th><th>商品明細</th><th>状況</th><th class="sales-amount">金額</th></tr></thead>
+            <tbody>${dayOrders.map((order) => `
+              <tr class="${order.status === 'cancelled' ? 'sales-cancelled' : ''}">
+                <td>${escapeHtml(new Date(order.createdAt).toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' }))}</td>
+                <td>${escapeHtml(order.number)}</td>
+                <td>${escapeHtml(order.tableId)}<br>${escapeHtml(order.customerName)}</td>
+                <td>${order.items.map((item) => `${escapeHtml(item.name)} × ${item.quantity}`).join('<br>')}</td>
+                <td>${escapeHtml(order.statusLabel)}</td>
+                <td class="sales-amount">${money(order.total)}${order.status === 'cancelled' ? '<br><small>売上対象外</small>' : ''}</td>
+              </tr>`).join('')}
+            </tbody>
+            <tfoot><tr><th colspan="5">売上合計（取消を除く）</th><th class="sales-amount">${money(revenue)}</th></tr></tfoot>
+          </table>` : '<div class="empty-state sales-empty">選択した日の注文流水はありません。</div>'}
+        </div>
+      </div>
+      <footer class="sales-print-footer">印刷日時：${escapeHtml(new Date().toLocaleString('ja-JP'))}</footer>
+    </section>`;
+
+  panel.querySelector('#sales-date').addEventListener('change', (event) => {
+    if (!event.target.value) return;
+    adminState.salesDate = event.target.value;
+    renderAdminPanel();
+  });
+  panel.querySelector('[data-action="print-sales"]').addEventListener('click', () => {
+    document.querySelector('.admin-page')?.classList.add('printing-sales');
+    window.addEventListener('afterprint', () => {
+      document.querySelector('.admin-page')?.classList.remove('printing-sales');
+    }, { once: true });
+    window.print();
+  });
 }
 
 async function loadAdminMenu() {
@@ -694,7 +766,7 @@ async function refreshAdmin() {
     const data = await api('/api/admin/orders');
     adminState.orders = data.orders;
     adminState.settings = data.settings;
-    if (adminState.tab === 'orders') renderAdminPanel();
+    if (adminState.tab === 'orders' || adminState.tab === 'sales') renderAdminPanel();
   } catch (error) {
     clearInterval(adminTimer);
     renderAdminLogin(error.message);
