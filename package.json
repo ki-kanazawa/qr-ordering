@@ -1,0 +1,24 @@
+{
+  "name": "table-ordering",
+  "version": "1.0.0",
+  "private": true,
+  "description": "日本語対応のQRコード注文サイトと店舗管理画面",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.7",
+    "express-rate-limit": "^8.1.0",
+    "express": "^4.21.2",
+    "express-session": "^1.18.1",
+    "multer": "^2.0.2",
+    "qrcode": "^1.5.4",
+    "sql.js": "^1.13.0"
+  }
+}
