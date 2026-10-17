@@ -1,6 +1,7 @@
 node_modules/
 .env
 data/
+file/*.pdf
 public/uploads/*
 !public/uploads/.gitkeep
 npm-debug.log*

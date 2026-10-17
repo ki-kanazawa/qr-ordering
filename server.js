@@ -7,12 +7,14 @@ const express = require('express');
 const { rateLimit } = require('express-rate-limit');
 const session = require('express-session');
 const multer = require('multer');
+const PDFDocument = require('pdfkit');
 const QRCode = require('qrcode');
 const store = require('./lib/store');
 
 const app = express();
 const port = Number(process.env.PORT) || 3000;
 const uploadsDirectory = path.join(__dirname, 'data', 'uploads');
+const salesReportsDirectory = path.join(__dirname, 'file');
 const uploadPhoto = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 5 * 1024 * 1024, files: 1 },
@@ -78,6 +80,148 @@ function rateLimitResponse(message) {
   return (req, res) => apiError(res, 429, message);
 }
 
+function japaneseDate(isoDate) {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Tokyo',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  }).formatToParts(new Date(isoDate));
+  const values = Object.fromEntries(parts.map(({ type, value }) => [type, value]));
+  return `${values.year}-${values.month}-${values.day}`;
+}
+
+function findJapanesePdfFont() {
+  const fontPath = process.env.PDF_FONT_PATH || [
+    'C:\\Windows\\Fonts\\NotoSansJP-VF.ttf',
+    'C:\\Windows\\Fonts\\YuGothR.ttc',
+    '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc',
+    '/usr/share/fonts/truetype/noto/NotoSansJP-Regular.ttf'
+  ].find((candidate) => fs.existsSync(candidate));
+  if (!fontPath || !fs.existsSync(fontPath)) {
+    throw new Error('日本語PDF用フォントが見つかりません。PDF_FONT_PATH に日本語対応フォントを指定してください。');
+  }
+  return fontPath;
+}
+
+function createSalesPdf({ date, restaurantName, orders }) {
+  return new Promise((resolve, reject) => {
+    const doc = new PDFDocument({
+      size: 'A4',
+      layout: 'landscape',
+      margins: { top: 32, bottom: 32, left: 32, right: 32 }
+    });
+    const chunks = [];
+    doc.on('data', (chunk) => chunks.push(chunk));
+    doc.on('error', reject);
+    doc.on('end', () => resolve(Buffer.concat(chunks)));
+
+    try {
+      doc.registerFont('Japanese', findJapanesePdfFont());
+      doc.font('Japanese').fillColor('#24352e');
+
+      const salesOrders = orders.filter((order) => order.status !== 'cancelled');
+      const revenue = salesOrders.reduce((sum, order) => sum + order.total, 0);
+      const itemQuantity = salesOrders.reduce((sum, order) =>
+        sum + order.items.reduce((orderQuantity, item) => orderQuantity + item.quantity, 0), 0);
+      const cancelledCount = orders.length - salesOrders.length;
+      const money = (value) => `￥${Math.round(value).toLocaleString('ja-JP')}`;
+      const formatDate = date.replaceAll('-', '/');
+
+      doc.fontSize(17).text(`${restaurantName} · 日次売上流水`, { align: 'center' });
+      doc.moveDown(0.25);
+      doc.fontSize(9).text(`対象日：${formatDate}`, { align: 'center' });
+      doc.moveDown(1.1);
+      doc.fontSize(11).text('売上集計');
+      doc.moveDown(0.45);
+      doc.fontSize(9)
+        .text(`売上合計（取消を除く）：${money(revenue)}　　有効注文数：${salesOrders.length}件　　販売数量：${itemQuantity}点　　取消注文：${cancelledCount}件`);
+      doc.moveDown(1);
+      doc.fontSize(11).text('注文流水');
+      doc.moveDown(0.4);
+
+      const columns = [
+        { title: '時刻', width: 48, value: (order) => new Date(order.createdAt).toLocaleTimeString('ja-JP', { timeZone: 'Asia/Tokyo', hour: '2-digit', minute: '2-digit' }) },
+        { title: '注文番号', width: 112, value: (order) => order.number },
+        { title: 'テーブル・お名前', width: 105, value: (order) => `${order.tableId}\n${order.customerName}` },
+        { title: '商品明細', width: 272, value: (order) => order.items.map((item) => `${item.name} × ${item.quantity}`).join('\n') },
+        { title: '状況', width: 96, value: (order) => order.statusLabel },
+        { title: '金額', width: 112, value: (order) => `${money(order.total)}${order.status === 'cancelled' ? '\n売上対象外' : ''}`, align: 'right' }
+      ];
+      const tableX = doc.page.margins.left;
+      const tableWidth = columns.reduce((sum, column) => sum + column.width, 0);
+      const cellPadding = 5;
+      const fontSize = 8;
+      const lineGap = 2;
+
+      function drawTableHeader() {
+        const top = doc.y;
+        const height = 23;
+        let x = tableX;
+        doc.font('Japanese').fontSize(fontSize);
+        for (const column of columns) {
+          doc.rect(x, top, column.width, height).fillAndStroke('#edf1eb', '#b8c0ba');
+          doc.fillColor('#24352e').text(column.title, x + cellPadding, top + 7, {
+            width: column.width - cellPadding * 2,
+            height: height - 8,
+            lineBreak: false
+          });
+          x += column.width;
+        }
+        doc.y = top + height;
+      }
+
+      drawTableHeader();
+      if (!orders.length) {
+        doc.font('Japanese').fontSize(9).text('選択した日の注文流水はありません。', tableX, doc.y + 10);
+      }
+
+      for (const order of orders) {
+        const values = columns.map((column) => column.value(order));
+        const rowHeight = Math.max(...values.map((value, index) =>
+          doc.heightOfString(value, {
+            width: columns[index].width - cellPadding * 2,
+            font: 'Japanese',
+            fontSize,
+            lineGap
+          }))) + cellPadding * 2;
+        if (doc.y + rowHeight > doc.page.height - doc.page.margins.bottom) {
+          doc.addPage();
+          drawTableHeader();
+        }
+
+        const top = doc.y;
+        let x = tableX;
+        columns.forEach((column, index) => {
+          doc.rect(x, top, column.width, rowHeight)
+            .fillAndStroke(order.status === 'cancelled' ? '#f4f4f2' : '#ffffff', '#c8ceca');
+          doc.fillColor(order.status === 'cancelled' ? '#737a75' : '#24352e')
+            .font('Japanese')
+            .fontSize(fontSize)
+            .text(values[index], x + cellPadding, top + cellPadding, {
+              width: column.width - cellPadding * 2,
+              height: rowHeight - cellPadding * 2,
+              lineGap,
+              align: column.align || 'left'
+            });
+          x += column.width;
+        });
+        doc.y = top + rowHeight;
+      }
+
+      doc.moveDown(0.8);
+      doc.font('Japanese').fontSize(10).fillColor('#24352e')
+        .text(`売上合計（取消を除く）：${money(revenue)}`, tableX + tableWidth - 220, doc.y, { width: 220, align: 'right' });
+      doc.moveDown(0.8);
+      doc.fontSize(8).fillColor('#64716a')
+        .text(`印刷日時：${new Date().toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' })}`, { align: 'right' });
+      doc.end();
+    } catch (error) {
+      doc.destroy(error);
+    }
+  });
+}
+
 const orderRateLimit = rateLimit({
   windowMs: 10 * 60 * 1000,
   limit: 10,
@@ -115,7 +259,28 @@ function imageExtension(buffer, mimeType) {
 
 app.get('/api/menu', (req, res) => {
   const data = store.readStore();
-  res.json({ settings: data.settings, menu: data.menu.filter((item) => item.available) });
+  const tableId = cleanText(req.query.table, 12);
+  const tableSession = data.settings.tableIds.includes(tableId)
+    ? store.readPublicTableSession(tableId)
+    : null;
+  res.json({ settings: data.settings, menu: data.menu.filter((item) => item.available), tableSession });
+});
+
+app.get('/api/tables/:tableId/session', (req, res) => {
+  const data = store.readStore();
+  const tableId = cleanText(req.params.tableId, 12);
+  if (!data.settings.tableIds.includes(tableId)) return apiError(res, 404, 'テーブル番号が見つかりません。');
+  res.json({ tableSession: store.readPublicTableSession(tableId) });
+});
+
+app.post('/api/tables/:tableId/checkout', orderRateLimit, (req, res) => {
+  try {
+    const tableSession = store.requestTableCheckout(cleanText(req.params.tableId, 12));
+    res.json({ tableSession });
+  } catch (error) {
+    if (error.status) return apiError(res, error.status, error.message);
+    throw error;
+  }
 });
 
 app.post('/api/orders', orderRateLimit, (req, res) => {
@@ -172,7 +337,66 @@ app.post('/api/admin/logout', requireAdmin, (req, res, next) => {
 
 app.get('/api/admin/orders', requireAdmin, (req, res) => {
   const data = store.readStore();
-  res.json({ orders: data.orders, settings: data.settings });
+  res.json({ orders: data.orders, settings: data.settings, tableSessions: store.readTableSessions() });
+});
+
+app.post('/api/admin/tables/:tableId/settle', requireAdmin, (req, res, next) => {
+  try {
+    res.json({ tableSession: store.settleTable(cleanText(req.params.tableId, 12)) });
+  } catch (error) {
+    if (error.status) return apiError(res, error.status, error.message);
+    next(error);
+  }
+});
+
+app.post('/api/admin/tables/:tableId/resume', requireAdmin, (req, res, next) => {
+  try {
+    res.json({ tableSession: store.resumeTableOrders(cleanText(req.params.tableId, 12)) });
+  } catch (error) {
+    if (error.status) return apiError(res, error.status, error.message);
+    next(error);
+  }
+});
+
+app.post('/api/admin/tables/:tableId/reopen', requireAdmin, (req, res, next) => {
+  try {
+    res.json({ tableSession: store.reopenTable(cleanText(req.params.tableId, 12)) });
+  } catch (error) {
+    if (error.status) return apiError(res, error.status, error.message);
+    next(error);
+  }
+});
+
+app.get('/api/admin/sales/:date.pdf', requireAdmin, async (req, res, next) => {
+  const { date } = req.params;
+  const parsedDate = /^\d{4}-\d{2}-\d{2}$/.test(date) ? new Date(`${date}T00:00:00.000Z`) : null;
+  if (!parsedDate || Number.isNaN(parsedDate.getTime()) || parsedDate.toISOString().slice(0, 10) !== date) {
+    return apiError(res, 400, '売上日付の形式が正しくありません。');
+  }
+
+  try {
+    const data = store.readStore();
+    const orders = data.orders
+      .filter((order) => japaneseDate(order.createdAt) === date)
+      .sort((first, second) => second.createdAt.localeCompare(first.createdAt));
+    const fileName = `売上_${date.replaceAll('-', '')}.pdf`;
+    const outputPath = path.join(salesReportsDirectory, fileName);
+    const temporaryPath = `${outputPath}.${crypto.randomUUID()}.tmp`;
+    const pdf = await createSalesPdf({
+      date,
+      restaurantName: data.settings.restaurantName,
+      orders
+    });
+    await fs.promises.mkdir(salesReportsDirectory, { recursive: true });
+    await fs.promises.writeFile(temporaryPath, pdf);
+    await fs.promises.rename(temporaryPath, outputPath);
+    res.set('Cache-Control', 'private, no-store');
+    res.download(outputPath, fileName, (error) => {
+      if (error && !res.headersSent) next(error);
+    });
+  } catch (error) {
+    next(error);
+  }
 });
 
 app.patch('/api/admin/orders/:id', requireAdmin, (req, res) => {

@@ -52,6 +52,8 @@ test('imports legacy store data into the SQLite database', () => {
   assert.equal(data.menu[0].name, '移行テスト定食');
   assert.equal(data.orders[0].id, 'legacy-order');
   assert.equal(data.orders[0].items[0].quantity, 1);
+  assert.equal(data.orders[0].paymentStatus, 'unpaid');
+  assert.equal(store.readTableSessions()[0].orderCount, 1);
   assert.equal(fs.existsSync(path.join(temporaryDirectory, 'restaurant.sqlite')), true);
 });
 
@@ -80,6 +82,54 @@ test('creates an order from database prices and deduplicates retries', () => {
     items: [{ id: 'legacy-dish', quantity: 1 }]
   }), (error) => error.status === 409);
   assert.equal(store.readStore().orders.length, 2);
+});
+
+test('requests payment, closes a table session, and opens a clean next session', () => {
+  const currentSession = store.readTableSessions()[0];
+  assert.equal(currentSession.status, 'open');
+  assert.equal(currentSession.orderCount, 2);
+  assert.equal(currentSession.total, 2400);
+
+  const checkoutRequest = store.requestTableCheckout('T01');
+  assert.equal(checkoutRequest.status, 'checkout_requested');
+  assert.equal(checkoutRequest.total, 2400);
+  assert.equal(store.requestTableCheckout('T01').status, 'checkout_requested');
+
+  assert.throws(() => store.createOrder({
+    tableId: 'T01',
+    customerName: '',
+    note: '',
+    items: [{ id: 'legacy-dish', quantity: 1 }],
+    idempotencyKey: crypto.randomUUID()
+  }), (error) => error.status === 409);
+
+  const resumedSession = store.resumeTableOrders('T01');
+  assert.equal(resumedSession.status, 'open');
+  assert.throws(() => store.resumeTableOrders('T01'), (error) => error.status === 409);
+  assert.equal(store.requestTableCheckout('T01').status, 'checkout_requested');
+
+  const settledSession = store.settleTable('T01');
+  assert.equal(settledSession.status, 'closed');
+  assert.ok(settledSession.paidAt);
+  assert.equal(store.readOrder('legacy-order').paymentStatus, 'paid');
+  assert.equal(store.readTableSessions()[0].status, 'closed');
+  assert.throws(() => store.settleTable('T01'), (error) => error.status === 409);
+
+  const nextSession = store.reopenTable('T01');
+  assert.equal(nextSession.status, 'open');
+  assert.equal(nextSession.orderCount, 0);
+  assert.notEqual(nextSession.id, settledSession.id);
+  assert.equal(store.readOrder('legacy-order').paymentStatus, 'paid');
+
+  const nextOrder = store.createOrder({
+    tableId: 'T01',
+    customerName: '次のお客様',
+    note: '',
+    items: [{ id: 'legacy-dish', quantity: 1 }],
+    idempotencyKey: crypto.randomUUID()
+  });
+  assert.equal(nextOrder.order.tableSessionId, nextSession.id);
+  assert.equal(store.readTableSessions()[0].orderCount, 1);
 });
 
 test('rejects invalid table numbers, items and excessive quantities', () => {

@@ -14,10 +14,12 @@ const state = {
   search: '',
   cart: loadCart(),
   tableId: new URLSearchParams(location.search).get('table') || '',
+  tableSession: null,
   trackedOrderId: localStorage.getItem('table-order:last-order') || '',
   pendingOrder: null,
   toastTimer: null,
-  pollTimer: null
+  pollTimer: null,
+  tableSessionTimer: null
 };
 
 function loadCart() {
@@ -81,13 +83,29 @@ function cartTotal() {
   return state.menu.reduce((sum, item) => sum + item.price * (state.cart[item.id] || 0), 0);
 }
 
+function updateCustomerTableSession(tableSession) {
+  const storageKey = `table-order:table-session:${state.tableId}`;
+  const previousSessionId = localStorage.getItem(storageKey);
+  const sessionChanged = Boolean(previousSessionId && tableSession.id && previousSessionId !== tableSession.id);
+  state.tableSession = tableSession;
+  if (tableSession.id) localStorage.setItem(storageKey, tableSession.id);
+  if ((sessionChanged || tableSession.status !== 'open') && cartQuantity() > 0) {
+    state.cart = {};
+    saveCart();
+    showToast(sessionChanged
+      ? '新しいテーブル営業が始まったため、未注文のカートをクリアしました。'
+      : '会計手続きに進んだため、未注文のカートをクリアしました。');
+  }
+  return sessionChanged;
+}
+
 async function boot() {
   if (location.pathname === '/admin') {
     await renderAdmin();
     return;
   }
   try {
-    const data = await api('/api/menu');
+    const data = await api(`/api/menu?table=${encodeURIComponent(state.tableId)}`);
     state.menu = data.menu;
     state.settings = data.settings;
     if (!state.tableId || !state.settings.tableIds.includes(state.tableId)) {
@@ -96,7 +114,10 @@ async function boot() {
         showToast('テーブル番号が無効なため、初期テーブルに切り替えました。');
       }
     }
+    const tableSession = data.tableSession || (await api(`/api/tables/${encodeURIComponent(state.tableId)}/session`)).tableSession;
+    updateCustomerTableSession(tableSession);
     renderCustomer();
+    startTableSessionPolling();
     if (state.trackedOrderId) {
       trackOrder(state.trackedOrderId, false);
       startOrderPolling();
@@ -115,6 +136,17 @@ function renderCustomer() {
     return categoryMatches && (!query || `${item.name} ${item.category} ${item.description}`.toLowerCase().includes(query));
   });
   const tableLabel = state.tableId ? `テーブル ${state.tableId}` : 'テーブルを選択';
+  const tableIsOpen = state.tableSession?.status === 'open';
+  const tableSessionNotice = state.tableSession?.status === 'checkout_requested'
+    ? `<div class="table-session-notice" role="status"><strong>お会計をスタッフに依頼しました</strong><span>お支払い確認まで、追加注文はできません。お会計予定額：${money(state.tableSession.total)}</span></div>`
+    : state.tableSession?.status === 'closed'
+      ? '<div class="table-session-notice closed" role="status"><strong>このテーブルのサービスは終了しました</strong><span>次回のご利用はスタッフにお声がけください。</span></div>'
+      : '';
+  const checkoutAction = state.tableSession?.status === 'checkout_requested'
+    ? '<button class="quiet-button" disabled>会計確認中</button>'
+    : tableIsOpen && state.tableSession.orderCount > 0 && cartQuantity() === 0
+      ? `<button class="quiet-button" data-action="request-table-checkout">お会計 · ${money(state.tableSession.total)}</button>`
+      : '';
 
   appRoot.innerHTML = `
     <main class="page-width">
@@ -122,9 +154,11 @@ function renderCustomer() {
         <a class="brand" href="/" aria-label="${escapeHtml(state.settings.restaurantName)} トップ"><span class="brand-mark">こ</span>${escapeHtml(state.settings.restaurantName)}</a>
         <div class="top-actions">
           <span class="table-pill">▦ ${escapeHtml(tableLabel)}</span>
+          ${checkoutAction}
           <button class="quiet-button" data-action="history">注文履歴</button>
         </div>
       </header>
+      ${tableSessionNotice}
       <section class="hero">
         <div class="hero-copy">
           <p class="eyebrow">GOOD FOOD, GOOD MOOD</p>
@@ -151,10 +185,10 @@ function renderCustomer() {
                   <span class="price">${money(item.price)}</span>
                   ${(state.cart[item.id] || 0) ? `
                     <div class="quantity-control menu-quantity-control" aria-label="${escapeHtml(item.name)}の注文数">
-                      <button data-action="change-quantity" data-id="${escapeHtml(item.id)}" data-change="-1" aria-label="${escapeHtml(item.name)}の数量を減らす">−</button>
+                      <button data-action="change-quantity" data-id="${escapeHtml(item.id)}" data-change="-1" aria-label="${escapeHtml(item.name)}の数量を減らす" ${tableIsOpen ? '' : 'disabled'}>−</button>
                       <span aria-live="polite">${state.cart[item.id]}</span>
-                      <button data-action="change-quantity" data-id="${escapeHtml(item.id)}" data-change="1" aria-label="${escapeHtml(item.name)}の数量を増やす">+</button>
-                    </div>` : `<button class="add-button" data-action="add" data-id="${escapeHtml(item.id)}" aria-label="${escapeHtml(item.name)}を追加">+</button>`}
+                      <button data-action="change-quantity" data-id="${escapeHtml(item.id)}" data-change="1" aria-label="${escapeHtml(item.name)}の数量を増やす" ${tableIsOpen ? '' : 'disabled'}>+</button>
+                    </div>` : `<button class="add-button" data-action="add" data-id="${escapeHtml(item.id)}" aria-label="${escapeHtml(item.name)}を追加" ${tableIsOpen ? '' : 'disabled'}>+</button>`}
                 </div>
               </div>
             </article>`).join('') : '<div class="empty-state">該当するメニューがありません。別のキーワードでお試しください。</div>'}
@@ -162,7 +196,7 @@ function renderCustomer() {
       </section>
       <footer class="footer"><span>おいしい料理を、心を込めて。 · ${escapeHtml(state.settings.restaurantName)}</span><a href="/admin">スタッフログイン ↗</a></footer>
     </main>
-    ${cartQuantity() ? `
+    ${cartQuantity() && tableIsOpen ? `
       <div class="cart-bar"><button class="cart-button" data-action="open-cart">
         <span class="cart-icon">🛍<span class="cart-count">${cartQuantity()}</span></span>
         <span>カートを見る</span>
@@ -223,6 +257,10 @@ function customerClick(event) {
     showToast('カートに追加しました');
   } else if (action === 'open-cart') {
     renderCartOverlay();
+  } else if (action === 'request-table-checkout') {
+    renderTableCheckoutConfirmation();
+  } else if (action === 'confirm-table-checkout') {
+    requestTableCheckout(button);
   } else if (action === 'close-overlay') {
     closeCustomerOverlay();
   } else if (action === 'change-quantity') {
@@ -250,6 +288,59 @@ function closeCustomerOverlay() {
   }
 }
 
+function renderTableCheckoutConfirmation() {
+  const overlay = appRoot.querySelector('#customer-overlay');
+  if (!state.tableSession || state.tableSession.status !== 'open' || state.tableSession.orderCount === 0) return;
+  overlay.hidden = false;
+  overlay.innerHTML = `
+    <section class="drawer" role="dialog" aria-modal="true" aria-labelledby="table-checkout-title">
+      <div class="drawer-head"><div><h2 id="table-checkout-title">お会計</h2><p>スタッフがテーブルでお支払いを確認します。</p></div><button class="icon-button" data-action="close-overlay" aria-label="閉じる">×</button></div>
+      <div class="table-checkout-summary"><span>テーブル ${escapeHtml(state.tableId)} · ${state.tableSession.orderCount}件のご注文</span><strong>${money(state.tableSession.total)}</strong></div>
+      <div class="payment-note">お会計を依頼すると、スタッフがお支払いを確認するまで追加注文ができなくなります。</div>
+      <button class="primary-button checkout-submit" data-action="confirm-table-checkout">スタッフにお会計を依頼する</button>
+    </section>`;
+}
+
+async function requestTableCheckout(button) {
+  button.disabled = true;
+  button.textContent = '送信中…';
+  try {
+    const result = await api(`/api/tables/${encodeURIComponent(state.tableId)}/checkout`, { method: 'POST' });
+    state.tableSession = result.tableSession;
+    renderCustomer();
+    showToast('お会計をスタッフに依頼しました');
+  } catch (error) {
+    button.disabled = false;
+    button.textContent = 'スタッフにお会計を依頼する';
+    showToast(error.message);
+  }
+}
+
+async function refreshTableSession(renderWhenChanged = true) {
+  try {
+    const { tableSession } = await api(`/api/tables/${encodeURIComponent(state.tableId)}/session`);
+    const previous = state.tableSession;
+    const sessionChanged = updateCustomerTableSession(tableSession);
+    if (renderWhenChanged && (
+      sessionChanged
+      || previous?.id !== tableSession.id
+      || previous?.status !== tableSession.status
+      || previous?.orderCount !== tableSession.orderCount
+      || previous?.total !== tableSession.total
+    )) {
+      renderCustomer();
+    }
+  } catch (error) {
+    clearInterval(state.tableSessionTimer);
+    showToast(`テーブル状況を更新できませんでした：${error.message}`);
+  }
+}
+
+function startTableSessionPolling() {
+  clearInterval(state.tableSessionTimer);
+  state.tableSessionTimer = setInterval(() => refreshTableSession(), 5000);
+}
+
 function renderCartOverlay() {
   const overlay = appRoot.querySelector('#customer-overlay');
   const items = state.menu.filter((item) => state.cart[item.id]);
@@ -269,7 +360,7 @@ function renderCartOverlay() {
         </div>`).join('')}
       </div>
       <div class="checkout-fields">
-        <div class="field"><label for="checkout-table">テーブル番号</label><select id="checkout-table">${state.settings.tableIds.map((table) => `<option value="${escapeHtml(table)}" ${table === state.tableId ? 'selected' : ''}>テーブル ${escapeHtml(table)}</option>`).join('')}</select></div>
+        <div class="field"><span class="field-label">テーブル番号</span><div class="table-number-display" aria-label="注文するテーブル番号">テーブル ${escapeHtml(state.tableId)}</div></div>
         <div class="field"><label for="customer-name">お名前（任意）</label><input id="customer-name" maxlength="40" placeholder="お呼びするお名前"></div>
         <div class="field full"><label for="order-note">ご要望（任意）</label><textarea id="order-note" maxlength="300" placeholder="例：辛さ控えめ、ねぎ抜き"></textarea></div>
       </div>
@@ -279,12 +370,16 @@ function renderCartOverlay() {
 }
 
 async function submitOrder() {
+  if (state.tableSession?.status !== 'open') {
+    showToast('このテーブルでは現在ご注文を受け付けていません。スタッフにお声がけください。');
+    return;
+  }
   const button = appRoot.querySelector('[data-action="submit-order"]');
   if (!button) return;
   button.disabled = true;
   button.textContent = '送信中…';
   const orderPayload = {
-    tableId: appRoot.querySelector('#checkout-table').value,
+    tableId: state.tableId,
     customerName: appRoot.querySelector('#customer-name').value,
     note: appRoot.querySelector('#order-note').value,
     items: state.menu.filter((item) => state.cart[item.id]).map((item) => ({ id: item.id, quantity: state.cart[item.id] }))
@@ -303,6 +398,7 @@ async function submitOrder() {
     state.cart = {};
     saveCart();
     state.tableId = result.order.tableId;
+    await refreshTableSession(false);
     state.trackedOrderId = result.order.id;
     localStorage.setItem('table-order:last-order', result.order.id);
     const orderIds = loadOrderHistory();
@@ -428,18 +524,19 @@ function renderAdminLogin(message = '') {
   });
 }
 
-let adminState = { orders: [], menu: [], settings: null, tab: 'orders', orderFilter: 'all', salesDate: formatDateInput(new Date()), editingId: '' };
+let adminState = { orders: [], menu: [], settings: null, tableSessions: [], tab: 'orders', orderFilter: 'all', salesDate: formatDateInput(new Date()), editingId: '' };
 let adminTimer = null;
 
 function renderDashboard(data) {
   adminState.orders = data.orders;
   adminState.settings = data.settings;
+  adminState.tableSessions = data.tableSessions;
   if (adminState.tab === 'menu' && !adminState.menu.length) loadAdminMenu();
   const main = document.querySelector('#admin-main');
   if (!main) return;
   main.innerHTML = `
     <nav class="admin-tabs">
-      ${[['orders', '📋 注文管理'], ['sales', '💴 売上・日次流水'], ['menu', '🍽 メニュー管理'], ['tables', '▦ テーブル・QRコード']].map(([tab, label]) => `<button class="admin-tab ${adminState.tab === tab ? 'active' : ''}" data-action="admin-tab" data-tab="${tab}">${label}</button>`).join('')}
+      ${[['orders', '📋 注文管理'], ['settlement', '💴 会計・テーブル'], ['sales', '💴 売上・日次流水'], ['menu', '🍽 メニュー管理'], ['tables', '▦ テーブル・QRコード']].map(([tab, label]) => `<button class="admin-tab ${adminState.tab === tab ? 'active' : ''}" data-action="admin-tab" data-tab="${tab}">${label}</button>`).join('')}
       <button class="admin-tab" style="margin-left:auto" data-action="logout">ログアウト</button>
     </nav>
     <section id="admin-panel"></section>`;
@@ -451,6 +548,7 @@ function renderAdminPanel() {
   const panel = document.querySelector('#admin-panel');
   if (!panel) return;
   if (adminState.tab === 'orders') renderOrdersPanel(panel);
+  if (adminState.tab === 'settlement') renderSettlementsPanel(panel);
   if (adminState.tab === 'sales') renderSalesPanel(panel);
   if (adminState.tab === 'menu') renderMenuPanel(panel);
   if (adminState.tab === 'tables') renderTablesPanel(panel);
@@ -507,6 +605,76 @@ function renderAdminOrder(order) {
   </article>`;
 }
 
+function renderSettlementsPanel(panel) {
+  panel.innerHTML = `
+    <div class="admin-panel">
+      <div class="section-title-row"><div><h2>会計・テーブル管理</h2><p>お支払いを確認してテーブルのサービスを終了します。次のお客様のご利用前に、新しい営業を開始してください。</p></div></div>
+      <div class="table-session-grid">${adminState.tableSessions.map((session) => {
+        const details = session.orders.length
+          ? session.orders.map((order) => `<div class="table-session-order"><span>${escapeHtml(order.number)} · ${escapeHtml(order.statusLabel)}</span><strong>${money(order.total)}</strong></div>`).join('')
+          : '<p class="table-session-empty">ご注文はありません</p>';
+        const actions = session.status === 'closed'
+          ? `<button class="small-button" data-action="reopen-table" data-table-id="${escapeHtml(session.tableId)}">次の営業を開始</button>`
+          : session.status === 'checkout_requested'
+            ? `<button class="small-button" data-action="resume-table" data-table-id="${escapeHtml(session.tableId)}">会計依頼を取り消して注文受付を再開</button>`
+          : session.orderCount
+            ? `<button class="primary-button" data-action="settle-table" data-table-id="${escapeHtml(session.tableId)}">入金確認・サービス終了</button>`
+            : '<span class="table-session-waiting">ご注文待ち</span>';
+        const stateLabel = session.status === 'checkout_requested' ? 'お客様から会計依頼あり' : session.statusLabel;
+        return `<article class="table-session-card ${session.status === 'closed' ? 'closed' : ''}">
+          <div class="table-session-heading"><div><h3>テーブル ${escapeHtml(session.tableId)}</h3><span class="tag ${session.status === 'closed' ? 'offline' : ''}">${escapeHtml(stateLabel)}</span></div><strong>${money(session.total)}</strong></div>
+          <div class="table-session-orders">${details}</div>
+          <div class="table-session-footer"><span>${session.orderCount}件の有効注文</span>${actions}</div>
+        </article>`;
+      }).join('')}</div>
+    </div>`;
+
+  panel.querySelectorAll('[data-action="settle-table"]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const tableId = button.dataset.tableId;
+      if (!window.confirm(`テーブル ${tableId} のお支払いを受け取ったことを確認し、サービスを終了しますか？`)) return;
+      button.disabled = true;
+      try {
+        await api(`/api/admin/tables/${encodeURIComponent(tableId)}/settle`, { method: 'POST' });
+        await refreshAdmin();
+        showToast(`テーブル ${tableId} の会計を完了しました`);
+      } catch (error) {
+        button.disabled = false;
+        showToast(error.message);
+      }
+    });
+  });
+  panel.querySelectorAll('[data-action="reopen-table"]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const tableId = button.dataset.tableId;
+      button.disabled = true;
+      try {
+        await api(`/api/admin/tables/${encodeURIComponent(tableId)}/reopen`, { method: 'POST' });
+        await refreshAdmin();
+        showToast(`テーブル ${tableId} の次の営業を開始しました`);
+      } catch (error) {
+        button.disabled = false;
+        showToast(error.message);
+      }
+    });
+  });
+  panel.querySelectorAll('[data-action="resume-table"]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const tableId = button.dataset.tableId;
+      if (!window.confirm(`テーブル ${tableId} の会計依頼を取り消し、注文受付を再開しますか？`)) return;
+      button.disabled = true;
+      try {
+        await api(`/api/admin/tables/${encodeURIComponent(tableId)}/resume`, { method: 'POST' });
+        await refreshAdmin();
+        showToast(`テーブル ${tableId} の注文受付を再開しました`);
+      } catch (error) {
+        button.disabled = false;
+        showToast(error.message);
+      }
+    });
+  });
+}
+
 function renderSalesPanel(panel) {
   const dayOrders = adminState.orders
     .filter((order) => formatDateInput(new Date(order.createdAt)) === adminState.salesDate)
@@ -527,7 +695,8 @@ function renderSalesPanel(panel) {
         <div class="sales-controls">
           <label class="sales-date-label" for="sales-date">営業日</label>
           <input id="sales-date" type="date" value="${escapeHtml(adminState.salesDate)}">
-          <button class="primary-button" type="button" data-action="print-sales">🖨 流水を印刷</button>
+          <a class="primary-button" href="/api/admin/sales/${encodeURIComponent(adminState.salesDate)}.pdf" download="売上_${adminState.salesDate.replaceAll('-', '')}.pdf">PDFを保存</a>
+          <button class="small-button" type="button" data-action="print-sales">印刷プレビュー</button>
         </div>
       </div>
       <div class="stats-grid sales-stats">
@@ -755,7 +924,7 @@ function adminClick(event) {
   } else if (button.dataset.action === 'logout') {
     api('/api/admin/logout', { method: 'POST' }).then(() => {
       clearInterval(adminTimer);
-      adminState = { orders: [], menu: [], settings: null, tab: 'orders', orderFilter: 'all', editingId: '' };
+      adminState = { orders: [], menu: [], settings: null, tableSessions: [], tab: 'orders', orderFilter: 'all', salesDate: formatDateInput(new Date()), editingId: '' };
       renderAdminLogin();
     }).catch((error) => showToast(error.message));
   }
@@ -766,7 +935,8 @@ async function refreshAdmin() {
     const data = await api('/api/admin/orders');
     adminState.orders = data.orders;
     adminState.settings = data.settings;
-    if (adminState.tab === 'orders' || adminState.tab === 'sales') renderAdminPanel();
+    adminState.tableSessions = data.tableSessions;
+    if (['orders', 'settlement', 'sales'].includes(adminState.tab)) renderAdminPanel();
   } catch (error) {
     clearInterval(adminTimer);
     renderAdminLogin(error.message);
